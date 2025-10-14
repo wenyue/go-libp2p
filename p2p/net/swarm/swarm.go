@@ -645,9 +645,16 @@ func (s *Swarm) bestConnToPeer(p peer.ID) *Conn {
 }
 
 // bestAcceptableConnToPeer returns the best acceptable connection, considering the passed in ctx.
+// if network.WithForceDial is used, it returns nil, forcing a dial.
 // If network.WithForceDirectDial is used, it only returns a direct connections, ignoring
 // any limited (relayed) connections to the peer.
 func (s *Swarm) bestAcceptableConnToPeer(ctx context.Context, p peer.ID) *Conn {
+	force, _ := network.GetForceDial(ctx)
+	if force {
+		// If force is set, we don't want to use any existing connections.
+		return nil
+	}
+
 	conn := s.bestConnToPeer(p)
 
 	forceDirect, _ := network.GetForceDirectDial(ctx)

@@ -46,10 +46,11 @@ func Wrap(h host.Host, r Routing) *RoutedHost {
 // RoutedHost's Connect differs in that if the host has no addresses for a
 // given peer, it will use its routing system to try to find some.
 func (rh *RoutedHost) Connect(ctx context.Context, pi peer.AddrInfo) error {
-	// first, check if we're already connected unless force direct dial.
+	// first, check if we're already connected unless force dial or for direct dial.
+	force, _ := network.GetForceDial(ctx)
 	forceDirect, _ := network.GetForceDirectDial(ctx)
 	canUseLimitedConn, _ := network.GetAllowLimitedConn(ctx)
-	if !forceDirect {
+	if !force && !forceDirect {
 		connectedness := rh.Network().Connectedness(pi.ID)
 		if connectedness == network.Connected || (canUseLimitedConn && connectedness == network.Limited) {
 			return nil
