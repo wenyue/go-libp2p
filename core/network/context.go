@@ -12,15 +12,35 @@ var DialPeerTimeout = 60 * time.Second
 
 type noDialCtxKey struct{}
 type dialPeerTimeoutCtxKey struct{}
+type forceDialCtxKey struct{}
 type forceDirectDialCtxKey struct{}
 type allowLimitedConnCtxKey struct{}
 type simConnectCtxKey struct{ isClient bool }
 
 var noDial = noDialCtxKey{}
+var forceDial = forceDialCtxKey{}
 var forceDirectDial = forceDirectDialCtxKey{}
 var allowLimitedConn = allowLimitedConnCtxKey{}
 var simConnectIsServer = simConnectCtxKey{}
 var simConnectIsClient = simConnectCtxKey{isClient: true}
+
+// EXPERIMENTAL
+// WithForceDial constructs a new context with an option that instructs the network
+// to attempt to force a new connection to a peer via a dial even if a connection to it already exists.
+func WithForceDial(ctx context.Context, reason string) context.Context {
+	return context.WithValue(ctx, forceDial, reason)
+}
+
+// EXPERIMENTAL
+// GetForceDial returns true if the force dial option is set in the context.
+func GetForceDial(ctx context.Context) (force bool, reason string) {
+	v := ctx.Value(forceDial)
+	if v != nil {
+		return true, v.(string)
+	}
+
+	return false, ""
+}
 
 // EXPERIMENTAL
 // WithForceDirectDial constructs a new context with an option that instructs the network

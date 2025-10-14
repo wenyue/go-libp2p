@@ -43,6 +43,9 @@ type activeDial struct {
 func (ad *activeDial) dial(ctx context.Context) (*Conn, error) {
 	dialCtx := ad.ctx
 
+	if force, reason := network.GetForceDial(ctx); force {
+		dialCtx = network.WithForceDial(dialCtx, reason)
+	}
 	if forceDirect, reason := network.GetForceDirectDial(ctx); forceDirect {
 		dialCtx = network.WithForceDirectDial(dialCtx, reason)
 	}

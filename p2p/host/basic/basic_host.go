@@ -695,9 +695,10 @@ func (h *BasicHost) Connect(ctx context.Context, pi peer.AddrInfo) error {
 	// absorb addresses into peerstore
 	h.Peerstore().AddAddrs(pi.ID, pi.Addrs, peerstore.TempAddrTTL)
 
+	forceDial, _ := network.GetForceDial(ctx)
 	forceDirect, _ := network.GetForceDirectDial(ctx)
 	canUseLimitedConn, _ := network.GetAllowLimitedConn(ctx)
-	if !forceDirect {
+	if !forceDial && !forceDirect {
 		connectedness := h.Network().Connectedness(pi.ID)
 		if connectedness == network.Connected || (canUseLimitedConn && connectedness == network.Limited) {
 			return nil

@@ -460,7 +460,9 @@ func (s *Swarm) resolveAddrs(ctx context.Context, pi peer.AddrInfo) []ma.Multiad
 
 func (s *Swarm) dialNextAddr(ctx context.Context, p peer.ID, addr ma.Multiaddr, resch chan transport.DialUpdate) error {
 	// check the dial backoff
-	if forceDirect, _ := network.GetForceDirectDial(ctx); !forceDirect {
+	force, _ := network.GetForceDial(ctx)
+	forceDirect, _ := network.GetForceDirectDial(ctx)
+	if !force && !forceDirect {
 		if s.backf.Backoff(p, addr) {
 			return ErrDialBackoff
 		}
