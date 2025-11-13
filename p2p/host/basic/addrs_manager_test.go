@@ -2,139 +2,27 @@ package basichost
 
 import (
 	"context"
-	"errors"
+	"crypto/rand"
 	"fmt"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/event"
 	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/peerstore"
 	"github.com/libp2p/go-libp2p/p2p/host/eventbus"
+	"github.com/libp2p/go-libp2p/p2p/host/peerstore/pstoremem"
 	"github.com/libp2p/go-libp2p/p2p/protocol/autonatv2"
 	ma "github.com/multiformats/go-multiaddr"
-	manet "github.com/multiformats/go-multiaddr/net"
+	"github.com/multiformats/go-multiaddr/matest"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func TestAppendNATAddrs(t *testing.T) {
-	if1, if2 := ma.StringCast("/ip4/192.168.0.100"), ma.StringCast("/ip4/1.1.1.1")
-	ifaceAddrs := []ma.Multiaddr{if1, if2}
-	tcpListenAddr, udpListenAddr := ma.StringCast("/ip4/0.0.0.0/tcp/1"), ma.StringCast("/ip4/0.0.0.0/udp/2/quic-v1")
-	cases := []struct {
-		Name        string
-		Listen      ma.Multiaddr
-		Nat         ma.Multiaddr
-		ObsAddrFunc func(ma.Multiaddr) []ma.Multiaddr
-		Expected    []ma.Multiaddr
-	}{
-		{
-			Name: "nat map success",
-			// nat mapping success, obsaddress ignored
-			Listen: ma.StringCast("/ip4/0.0.0.0/udp/1/quic-v1"),
-			Nat:    ma.StringCast("/ip4/1.1.1.1/udp/10/quic-v1"),
-			ObsAddrFunc: func(_ ma.Multiaddr) []ma.Multiaddr {
-				return []ma.Multiaddr{ma.StringCast("/ip4/2.2.2.2/udp/100/quic-v1")}
-			},
-			Expected: []ma.Multiaddr{ma.StringCast("/ip4/1.1.1.1/udp/10/quic-v1")},
-		},
-		{
-			Name: "nat map failure",
-			// nat mapping fails, obs addresses added
-			Listen: ma.StringCast("/ip4/0.0.0.0/tcp/1"),
-			Nat:    nil,
-			ObsAddrFunc: func(a ma.Multiaddr) []ma.Multiaddr {
-				ipC, _ := ma.SplitFirst(a)
-				ip := ipC.Multiaddr()
-				switch {
-				case ip.Equal(if1):
-					return []ma.Multiaddr{ma.StringCast("/ip4/2.2.2.2/tcp/100")}
-				case ip.Equal(if2):
-					return []ma.Multiaddr{ma.StringCast("/ip4/3.3.3.3/tcp/100")}
-				default:
-					return []ma.Multiaddr{}
-				}
-			},
-			Expected: []ma.Multiaddr{ma.StringCast("/ip4/2.2.2.2/tcp/100"), ma.StringCast("/ip4/3.3.3.3/tcp/100")},
-		},
-		{
-			Name: "if addrs ignored if not listening on unspecified",
-			// nat mapping fails, obs addresses added
-			Listen: ma.StringCast("/ip4/192.168.1.1/tcp/1"),
-			Nat:    nil,
-			ObsAddrFunc: func(a ma.Multiaddr) []ma.Multiaddr {
-				ipC, _ := ma.SplitFirst(a)
-				ip := ipC.Multiaddr()
-				switch {
-				case ip.Equal(if1):
-					return []ma.Multiaddr{ma.StringCast("/ip4/2.2.2.2/tcp/100")}
-				case ip.Equal(if2):
-					return []ma.Multiaddr{ma.StringCast("/ip4/3.3.3.3/tcp/100")}
-				case ip.Equal(ma.StringCast("/ip4/192.168.1.1")):
-					return []ma.Multiaddr{ma.StringCast("/ip4/4.4.4.4/tcp/100")}
-				default:
-					return []ma.Multiaddr{}
-				}
-			},
-			Expected: []ma.Multiaddr{ma.StringCast("/ip4/4.4.4.4/tcp/100")},
-		},
-		{
-			Name: "nat map success but CGNAT",
-			// nat addr added, obs address added with nat provided port
-			Listen: tcpListenAddr,
-			Nat:    ma.StringCast("/ip4/100.100.1.1/tcp/100"),
-			ObsAddrFunc: func(a ma.Multiaddr) []ma.Multiaddr {
-				ipC, _ := ma.SplitFirst(a)
-				ip := ipC.Multiaddr()
-				if ip.Equal(if1) {
-					return []ma.Multiaddr{ma.StringCast("/ip4/2.2.2.2/tcp/20")}
-				}
-				return []ma.Multiaddr{ma.StringCast("/ip4/3.3.3.3/tcp/30")}
-			},
-			Expected: []ma.Multiaddr{
-				ma.StringCast("/ip4/100.100.1.1/tcp/100"),
-				ma.StringCast("/ip4/2.2.2.2/tcp/20"),
-				ma.StringCast("/ip4/3.3.3.3/tcp/30"),
-			},
-		},
-		{
-			Name: "uses unspecified address for obs address",
-			// observed address manager should be queries with both specified and unspecified addresses
-			// udp observed addresses are mapped to unspecified addresses
-			Listen: udpListenAddr,
-			Nat:    nil,
-			ObsAddrFunc: func(a ma.Multiaddr) []ma.Multiaddr {
-				if manet.IsIPUnspecified(a) {
-					return []ma.Multiaddr{ma.StringCast("/ip4/3.3.3.3/udp/20/quic-v1")}
-				}
-				return []ma.Multiaddr{ma.StringCast("/ip4/2.2.2.2/udp/20/quic-v1")}
-			},
-			Expected: []ma.Multiaddr{
-				ma.StringCast("/ip4/2.2.2.2/udp/20/quic-v1"),
-				ma.StringCast("/ip4/3.3.3.3/udp/20/quic-v1"),
-			},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.Name, func(t *testing.T) {
-			as := &addrsManager{
-				natManager: &mockNatManager{
-					GetMappingFunc: func(_ ma.Multiaddr) ma.Multiaddr {
-						return tc.Nat
-					},
-				},
-				observedAddrsManager: &mockObservedAddrs{
-					ObservedAddrsForFunc: tc.ObsAddrFunc,
-				},
-			}
-			res := as.appendNATAddrs(nil, []ma.Multiaddr{tc.Listen}, ifaceAddrs)
-			res = ma.Unique(res)
-			require.ElementsMatch(t, tc.Expected, res, "%s\n%s", tc.Expected, res)
-		})
-	}
-}
 
 type mockNatManager struct {
 	GetMappingFunc func(addr ma.Multiaddr) ma.Multiaddr
@@ -158,25 +46,32 @@ func (*mockNatManager) HasDiscoveredNAT() bool {
 var _ NATManager = &mockNatManager{}
 
 type mockObservedAddrs struct {
-	OwnObservedAddrsFunc func() []ma.Multiaddr
-	ObservedAddrsForFunc func(ma.Multiaddr) []ma.Multiaddr
+	AddrsFunc    func() []ma.Multiaddr
+	AddrsForFunc func(ma.Multiaddr) []ma.Multiaddr
 }
 
-func (m *mockObservedAddrs) OwnObservedAddrs() []ma.Multiaddr {
-	return m.OwnObservedAddrsFunc()
-}
+func (m *mockObservedAddrs) Addrs(int) []ma.Multiaddr { return m.AddrsFunc() }
 
-func (m *mockObservedAddrs) ObservedAddrsFor(local ma.Multiaddr) []ma.Multiaddr {
-	return m.ObservedAddrsForFunc(local)
+func (m *mockObservedAddrs) AddrsFor(local ma.Multiaddr) []ma.Multiaddr { return m.AddrsForFunc(local) }
+
+var _ ObservedAddrsManager = &mockObservedAddrs{}
+
+type addrStoreArgs struct {
+	AddrStore               addrStore
+	SignKey                 crypto.PrivKey
+	HostID                  peer.ID
+	DisableSignedPeerRecord bool
 }
 
 type addrsManagerArgs struct {
 	NATManager           NATManager
 	AddrsFactory         AddrsFactory
-	ObservedAddrsManager observedAddrsManager
+	ObservedAddrsManager ObservedAddrsManager
 	ListenAddrs          func() []ma.Multiaddr
+	AddCertHashes        func([]ma.Multiaddr) []ma.Multiaddr
 	AutoNATClient        autonatv2Client
 	Bus                  event.Bus
+	AddrStoreArgs        addrStoreArgs
 }
 
 type addrsManagerTestCase struct {
@@ -185,7 +80,7 @@ type addrsManagerTestCase struct {
 	PushReachability func(rch network.Reachability)
 }
 
-func newAddrsManagerTestCase(t *testing.T, args addrsManagerArgs) addrsManagerTestCase {
+func newAddrsManagerTestCase(tb testing.TB, args addrsManagerArgs) addrsManagerTestCase {
 	eb := args.Bus
 	if eb == nil {
 		eb = eventbus.NewBus()
@@ -193,29 +88,59 @@ func newAddrsManagerTestCase(t *testing.T, args addrsManagerArgs) addrsManagerTe
 	if args.AddrsFactory == nil {
 		args.AddrsFactory = func(addrs []ma.Multiaddr) []ma.Multiaddr { return addrs }
 	}
-	addrsUpdatedChan := make(chan struct{}, 1)
-	am, err := newAddrsManager(
-		eb, args.NATManager, args.AddrsFactory, args.ListenAddrs, nil, args.ObservedAddrsManager, addrsUpdatedChan, args.AutoNATClient, true, prometheus.DefaultRegisterer,
-	)
-	require.NoError(t, err)
 
-	require.NoError(t, am.Start())
+	addCertHashes := func(addrs []ma.Multiaddr) []ma.Multiaddr {
+		return addrs
+	}
+	if args.AddCertHashes != nil {
+		addCertHashes = args.AddCertHashes
+	}
+	signKey := args.AddrStoreArgs.SignKey
+	addrStore := args.AddrStoreArgs.AddrStore
+	pid := args.AddrStoreArgs.HostID
+	if args.AddrStoreArgs == (addrStoreArgs{}) {
+		var err error
+		signKey, _, err = crypto.GenerateEd25519Key(rand.Reader)
+		require.NoError(tb, err)
+		addrStore, err = pstoremem.NewPeerstore()
+		require.NoError(tb, err)
+		pid, err = peer.IDFromPrivateKey(signKey)
+		require.NoError(tb, err)
+	}
+	am, err := newAddrsManager(
+		eb,
+		args.NATManager,
+		args.AddrsFactory,
+		args.ListenAddrs,
+		addCertHashes,
+		args.ObservedAddrsManager,
+		args.AutoNATClient,
+		true,
+		prometheus.DefaultRegisterer,
+		false,
+		signKey,
+		addrStore,
+		pid,
+	)
+	require.NoError(tb, err)
+
+	require.NoError(tb, am.Start())
 	raEm, err := eb.Emitter(new(event.EvtAutoRelayAddrsUpdated), eventbus.Stateful)
-	require.NoError(t, err)
+	require.NoError(tb, err)
 
 	rchEm, err := eb.Emitter(new(event.EvtLocalReachabilityChanged), eventbus.Stateful)
-	require.NoError(t, err)
+	require.NoError(tb, err)
 
-	t.Cleanup(am.Close)
+	tb.Cleanup(am.Close)
 	return addrsManagerTestCase{
 		addrsManager: am,
 		PushRelay: func(relayAddrs []ma.Multiaddr) {
 			err := raEm.Emit(event.EvtAutoRelayAddrsUpdated{RelayAddrs: relayAddrs})
-			require.NoError(t, err)
+			require.NoError(tb, err)
 		},
 		PushReachability: func(rch network.Reachability) {
 			err := rchEm.Emit(event.EvtLocalReachabilityChanged{Reachability: rch})
-			require.NoError(t, err)
+			require.NoError(tb, err)
 		},
 	}
 }
@@ -225,7 +150,9 @@ func TestAddrsManager(t *testing.T) {
 	lhtcp := ma.StringCast("/ip4/127.0.0.1/tcp/1")
 
 	publicQUIC := ma.StringCast("/ip4/1.2.3.4/udp/1/quic-v1")
+	publicQUIC2 := ma.StringCast("/ip4/1.2.3.4/udp/2/quic-v1")
 	publicTCP := ma.StringCast("/ip4/1.2.3.4/tcp/1")
+	privQUIC := ma.StringCast("/ip4/100.100.100.101/udp/1/quic-v1")
 
 	t.Run("only nat", func(t *testing.T) {
 		am := newAddrsManagerTestCase(t, addrsManagerArgs{
@@ -239,7 +166,7 @@ func TestAddrsManager(t *testing.T) {
 			},
 			ListenAddrs: func() []ma.Multiaddr { return []ma.Multiaddr{lhquic, lhtcp} },
 		})
-		am.triggerAddrsUpdate()
+		am.updateAddrsSync()
 		require.EventuallyWithT(t, func(collect *assert.CollectT) {
 			expected := []ma.Multiaddr{publicQUIC, lhquic, lhtcp}
 			assert.ElementsMatch(collect, am.Addrs(), expected, "%s\n%s", am.Addrs(), expected)
@@ -252,15 +179,18 @@ func TestAddrsManager(t *testing.T) {
 			NATManager: &mockNatManager{
 				GetMappingFunc: func(addr ma.Multiaddr) ma.Multiaddr {
 					if _, err := addr.ValueForProtocol(ma.P_UDP); err == nil {
-						return publicQUIC
+						return privQUIC
 					}
 					return nil
 				},
 			},
 			ObservedAddrsManager: &mockObservedAddrs{
-				ObservedAddrsForFunc: func(addr ma.Multiaddr) []ma.Multiaddr {
+				AddrsForFunc: func(addr ma.Multiaddr) []ma.Multiaddr {
 					if _, err := addr.ValueForProtocol(ma.P_TCP); err == nil {
 						return []ma.Multiaddr{publicTCP}
+					}
+					if _, err := addr.ValueForProtocol(ma.P_UDP); err == nil {
+						return []ma.Multiaddr{publicQUIC2}
 					}
 					return nil
 				},
@@ -268,13 +198,13 @@ func TestAddrsManager(t *testing.T) {
 			ListenAddrs: func() []ma.Multiaddr { return []ma.Multiaddr{lhquic, lhtcp} },
 		})
 		require.EventuallyWithT(t, func(collect *assert.CollectT) {
-			expected := []ma.Multiaddr{lhquic, lhtcp, publicQUIC, publicTCP}
+			expected := []ma.Multiaddr{lhquic, lhtcp, privQUIC, publicTCP, publicQUIC2}
 			assert.ElementsMatch(collect, am.Addrs(), expected, "%s\n%s", am.Addrs(), expected)
 		}, 5*time.Second, 50*time.Millisecond)
 	})
+
 	t.Run("nat returns unspecified addr", func(t *testing.T) {
 		quicPort1 := ma.StringCast("/ip4/3.3.3.3/udp/1/quic-v1")
-		quicPort2 := ma.StringCast("/ip4/3.3.3.3/udp/2/quic-v1")
 		// port from nat, IP from observed addr
 		am := newAddrsManagerTestCase(t, addrsManagerArgs{
 			NATManager: &mockNatManager{
@@ -286,7 +216,7 @@ func TestAddrsManager(t *testing.T) {
 				},
 			},
 			ObservedAddrsManager: &mockObservedAddrs{
-				ObservedAddrsForFunc: func(addr ma.Multiaddr) []ma.Multiaddr {
+				AddrsForFunc: func(addr ma.Multiaddr) []ma.Multiaddr {
 					if addr.Equal(lhquic) {
 						return []ma.Multiaddr{quicPort1}
 					}
@@ -295,7 +225,7 @@ func TestAddrsManager(t *testing.T) {
 			},
 			ListenAddrs: func() []ma.Multiaddr { return []ma.Multiaddr{lhquic} },
 		})
-		expected := []ma.Multiaddr{lhquic, quicPort2}
+		expected := []ma.Multiaddr{lhquic, quicPort1}
 		require.EventuallyWithT(t, func(collect *assert.CollectT) {
 			assert.ElementsMatch(collect, am.Addrs(), expected, "%s\n%s", am.Addrs(), expected)
 		}, 5*time.Second, 50*time.Millisecond)
@@ -303,7 +233,7 @@ func TestAddrsManager(t *testing.T) {
 	t.Run("only observed addrs", func(t *testing.T) {
 		am := newAddrsManagerTestCase(t, addrsManagerArgs{
 			ObservedAddrsManager: &mockObservedAddrs{
-				ObservedAddrsForFunc: func(addr ma.Multiaddr) []ma.Multiaddr {
+				AddrsForFunc: func(addr ma.Multiaddr) []ma.Multiaddr {
 					if addr.Equal(lhtcp) {
 						return []ma.Multiaddr{publicTCP}
 					}
@@ -315,7 +245,7 @@ func TestAddrsManager(t *testing.T) {
 			},
 			ListenAddrs: func() []ma.Multiaddr { return []ma.Multiaddr{lhquic, lhtcp} },
 		})
-		am.triggerAddrsUpdate()
+		am.updateAddrsSync()
 		expected := []ma.Multiaddr{lhquic, lhtcp, publicTCP, publicQUIC}
 		require.EventuallyWithT(t, func(collect *assert.CollectT) {
 			assert.ElementsMatch(collect, am.Addrs(), expected, "%s\n%s", am.Addrs(), expected)
@@ -337,23 +267,23 @@ func TestAddrsManager(t *testing.T) {
 		}
 		am := newAddrsManagerTestCase(t, addrsManagerArgs{
 			ObservedAddrsManager: &mockObservedAddrs{
-				ObservedAddrsForFunc: func(_ ma.Multiaddr) []ma.Multiaddr {
+				AddrsForFunc: func(_ ma.Multiaddr) []ma.Multiaddr {
 					return quicAddrs
 				},
 			},
 			ListenAddrs: func() []ma.Multiaddr { return []ma.Multiaddr{lhquic} },
 		})
-		am.triggerAddrsUpdate()
+		am.updateAddrsSync()
 		expected := []ma.Multiaddr{lhquic}
 		expected = append(expected, quicAddrs[:maxObservedAddrsPerListenAddr]...)
 		require.EventuallyWithT(t, func(collect *assert.CollectT) {
-			assert.ElementsMatch(collect, am.Addrs(), expected, "%s\n%s", am.Addrs(), expected)
-		}, 5*time.Second, 50*time.Millisecond)
+			matest.AssertMultiaddrsMatch(collect, expected, am.Addrs())
+		}, 2*time.Second, 50*time.Millisecond)
 	})
 	t.Run("public addrs removed when private", func(t *testing.T) {
 		am := newAddrsManagerTestCase(t, addrsManagerArgs{
 			ObservedAddrsManager: &mockObservedAddrs{
-				ObservedAddrsForFunc: func(_ ma.Multiaddr) []ma.Multiaddr {
+				AddrsForFunc: func(_ ma.Multiaddr) []ma.Multiaddr {
 					return []ma.Multiaddr{publicQUIC}
 				},
 			},
@@ -395,7 +325,7 @@ func TestAddrsManager(t *testing.T) {
 				return nil
 			},
 			ObservedAddrsManager: &mockObservedAddrs{
-				ObservedAddrsForFunc: func(_ ma.Multiaddr) []ma.Multiaddr {
+				AddrsForFunc: func(_ ma.Multiaddr) []ma.Multiaddr {
 					return []ma.Multiaddr{publicQUIC}
 				},
 			},
@@ -428,11 +358,31 @@ func TestAddrsManager(t *testing.T) {
 		require.Contains(t, am.Addrs(), publicTCP)
 		require.NotContains(t, am.Addrs(), publicQUIC)
 		close(updateChan)
-		am.triggerAddrsUpdate()
+		am.updateAddrsSync()
 		require.EventuallyWithT(t, func(collect *assert.CollectT) {
 			assert.Contains(collect, am.Addrs(), publicQUIC)
 			assert.NotContains(collect, am.Addrs(), publicTCP)
 		}, 1*time.Second, 50*time.Millisecond)
+	})
+
+	t.Run("addrs factory depends on confirmed addrs", func(t *testing.T) {
+		var amp atomic.Pointer[addrsManager]
+		q1 := ma.StringCast("/ip4/1.1.1.1/udp/1/quic-v1")
+		addrsFactory := func(_ []ma.Multiaddr) []ma.Multiaddr {
+			if amp.Load() == nil {
+				return nil
+			}
+			// r is empty as there's no reachability tracker
+			r, _, _ := amp.Load().ConfirmedAddrs()
+			return append(r, q1)
+		}
+		am := newAddrsManagerTestCase(t, addrsManagerArgs{
+			AddrsFactory: addrsFactory,
+			ListenAddrs:  func() []ma.Multiaddr { return []ma.Multiaddr{lhquic, lhtcp} },
+		})
+		amp.Store(am.addrsManager)
+		am.updateAddrsSync()
+		matest.AssertEqualMultiaddrs(t, []ma.Multiaddr{q1}, am.Addrs())
 	})
 }
 
@@ -455,10 +405,10 @@ func TestAddrsManagerReachabilityEvent(t *testing.T) {
 			F: func(_ context.Context, reqs []autonatv2.Request) (autonatv2.Result, error) {
 				if reqs[0].Addr.Equal(publicQUIC) {
 					return autonatv2.Result{Addr: reqs[0].Addr, Idx: 0, Reachability: network.ReachabilityPublic}, nil
-				} else if reqs[0].Addr.Equal(publicTCP) || reqs[0].Addr.Equal(publicQUIC2) {
+				} else if reqs[0].Addr.Equal(publicQUIC2) {
 					return autonatv2.Result{Addr: reqs[0].Addr, Idx: 0, Reachability: network.ReachabilityPrivate}, nil
 				}
-				return autonatv2.Result{}, errors.New("invalid")
+				return autonatv2.Result{Addr: reqs[0].Addr, Idx: 0, Reachability: network.ReachabilityUnknown, AllAddrsRefused: true}, nil
 			},
 		},
 	})
@@ -478,20 +428,64 @@ func TestAddrsManagerReachabilityEvent(t *testing.T) {
 
 	// Wait for probes to complete and addresses to be classified
 	reachableAddrs := []ma.Multiaddr{publicQUIC}
-	unreachableAddrs := []ma.Multiaddr{publicTCP, publicQUIC2}
+	unreachableAddrs := []ma.Multiaddr{publicQUIC2}
+	unknownAddrs := []ma.Multiaddr{publicTCP}
 	select {
 	case e := <-sub.Out():
 		evt := e.(event.EvtHostReachableAddrsChanged)
-		require.ElementsMatch(t, reachableAddrs, evt.Reachable)
-		require.ElementsMatch(t, unreachableAddrs, evt.Unreachable)
-		require.Empty(t, evt.Unknown)
+		matest.AssertMultiaddrsMatch(t, reachableAddrs, evt.Reachable)
+		matest.AssertMultiaddrsMatch(t, unreachableAddrs, evt.Unreachable)
+		matest.AssertMultiaddrsMatch(t, unknownAddrs, evt.Unknown)
 		reachable, unreachable, unknown := am.ConfirmedAddrs()
-		require.ElementsMatch(t, reachable, reachableAddrs)
-		require.ElementsMatch(t, unreachable, unreachableAddrs)
-		require.Empty(t, unknown)
+		matest.AssertMultiaddrsMatch(t, reachableAddrs, reachable)
+		matest.AssertMultiaddrsMatch(t, unreachableAddrs, unreachable)
+		matest.AssertMultiaddrsMatch(t, unknownAddrs, unknown)
+		// unreachable addrs should be removed
+		matest.AssertMultiaddrsMatch(t, []ma.Multiaddr{publicQUIC, publicTCP}, am.Addrs())
 	case <-time.After(5 * time.Second):
 		t.Fatal("expected final event for reachability change after probing")
 	}
+}
+
+func TestAddrsManagerPeerstoreUpdated(t *testing.T) {
+	quic1 := ma.StringCast("/ip4/1.2.3.4/udp/1234/quic-v1")
+	quic2 := ma.StringCast("/ip4/1.2.3.5/udp/1/quic-v1")
+
+	pstore, err := pstoremem.NewPeerstore()
+	require.NoError(t, err)
+	cab, _ := peerstore.GetCertifiedAddrBook(pstore)
+	signKey, _, err := crypto.GenerateEd25519Key(rand.Reader)
+	require.NoError(t, err)
+	pid, err := peer.IDFromPrivateKey(signKey)
+	require.NoError(t, err)
+
+	var update atomic.Bool
+	am := newAddrsManagerTestCase(t, addrsManagerArgs{
+		ListenAddrs: func() []ma.Multiaddr { return nil },
+		AddrsFactory: func([]ma.Multiaddr) []ma.Multiaddr {
+			if !update.Load() {
+				return []ma.Multiaddr{quic1}
+			}
+			return []ma.Multiaddr{quic2}
+		},
+		AddrStoreArgs: addrStoreArgs{
+			AddrStore: pstore,
+			HostID:    pid,
+			SignKey:   signKey,
+		},
+	})
+	defer am.Close()
+	matest.AssertEqualMultiaddrs(t, []ma.Multiaddr{quic1}, pstore.Addrs(pid))
+	ev := cab.GetPeerRecord(pid)
+	pr := peerRecordFromEnvelope(t, ev)
+	require.Equal(t, pr.Addrs, []ma.Multiaddr{quic1})
+	update.Store(true)
+	am.updateAddrsSync()
+	matest.AssertEqualMultiaddrs(t, []ma.Multiaddr{quic2}, pstore.Addrs(pid))
+	ev = cab.GetPeerRecord(pid)
+	pr = peerRecordFromEnvelope(t, ev)
+	require.Equal(t, pr.Addrs, []ma.Multiaddr{quic2})
+
 }
 
 func TestRemoveIfNotInSource(t *testing.T) {

@@ -19,13 +19,13 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
 	"github.com/libp2p/go-libp2p/core/sec"
-	"github.com/libp2p/go-libp2p/core/sec/insecure"
 	"github.com/libp2p/go-libp2p/core/test"
 	"github.com/libp2p/go-libp2p/core/transport"
 	"github.com/libp2p/go-libp2p/p2p/host/eventbus"
 	"github.com/libp2p/go-libp2p/p2p/host/peerstore/pstoremem"
 	"github.com/libp2p/go-libp2p/p2p/muxer/yamux"
 	tptu "github.com/libp2p/go-libp2p/p2p/net/upgrader"
+	"github.com/libp2p/go-libp2p/p2p/security/insecure"
 	libp2pquic "github.com/libp2p/go-libp2p/p2p/transport/quic"
 	"github.com/libp2p/go-libp2p/p2p/transport/quicreuse"
 	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
@@ -487,7 +487,7 @@ func TestDialQueueNextBatch(t *testing.T) {
 				sort.Slice(batch, func(i, j int) bool { return batch[i].String() < batch[j].String() })
 				for i := 0; i < len(b); i++ {
 					if !b[i].Addr.Equal(batch[i]) {
-						log.Errorf("expected %s got %s", batch[i], b[i].Addr)
+						log.Error("expected address mismatch", "expected", batch[i], "got", b[i].Addr)
 					}
 				}
 			}
@@ -910,7 +910,7 @@ func TestDialWorkerLoopSchedulingProperty(t *testing.T) {
 		s1.dialRanker = makeRanker(tc.input)
 		err := checkDialWorkerLoopScheduling(t, s1, s2, tc)
 		if err != nil {
-			log.Error(err)
+			t.Log(err)
 		}
 		return err == nil
 	}
