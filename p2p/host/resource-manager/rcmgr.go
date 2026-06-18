@@ -138,6 +138,7 @@ type Option func(*resourceManager) error
 
 func NewResourceManager(limits Limiter, opts ...Option) (network.ResourceManager, error) {
 	allowlist := newAllowlist()
+	connRateLimiter := newConnRateLimiter()
 	r := &resourceManager{
 		limits:          limits,
 		connLimiter:     newConnLimiter(),
@@ -145,7 +146,7 @@ func NewResourceManager(limits Limiter, opts ...Option) (network.ResourceManager
 		svc:             make(map[string]*serviceScope),
 		proto:           make(map[protocol.ID]*protocolScope),
 		peer:            make(map[peer.ID]*peerScope),
-		connRateLimiter: newConnRateLimiter(),
+		connRateLimiter: connRateLimiter,
 	}
 
 	for _, opt := range opts {
@@ -154,12 +155,20 @@ func NewResourceManager(limits Limiter, opts ...Option) (network.ResourceManager
 		}
 	}
 
+	useDefaultConnRateLimiter := r.connRateLimiter == connRateLimiter
+
 	registeredConnLimiterPrefixes := make(map[string]struct{})
 	for _, npLimit := range r.connLimiter.networkPrefixLimitV4 {
 		registeredConnLimiterPrefixes[npLimit.Network.String()] = struct{}{}
 	}
 	for _, npLimit := range r.connLimiter.networkPrefixLimitV6 {
 		registeredConnLimiterPrefixes[npLimit.Network.String()] = struct{}{}
+	}
+	registeredConnRateLimiterPrefixes := make(map[string]struct{})
+	if useDefaultConnRateLimiter && r.connRateLimiter != nil {
+		for _, npLimit := range r.connRateLimiter.NetworkPrefixLimits {
+			registeredConnRateLimiterPrefixes[npLimit.Prefix.String()] = struct{}{}
+		}
 	}
 	for _, network := range allowlist.allowedNetworks {
 		prefix, err := netip.ParsePrefix(network.String())
@@ -173,6 +182,14 @@ func NewResourceManager(limits Limiter, opts ...Option) (network.ResourceManager
 				Network:   prefix,
 				ConnCount: r.limits.GetAllowlistedSystemLimits().GetConnTotalLimit(),
 			})
+		}
+		if useDefaultConnRateLimiter && r.connRateLimiter != nil {
+			if _, ok := registeredConnRateLimiterPrefixes[prefix.String()]; !ok {
+				r.connRateLimiter.NetworkPrefixLimits = append(r.connRateLimiter.NetworkPrefixLimits, rate.PrefixLimit{
+					Prefix: prefix,
+					Limit:  rate.Limit{},
+				})
+			}
 		}
 	}
 	r.verifySourceAddressRateLimiter = newVerifySourceAddressRateLimiter(r.connLimiter)
